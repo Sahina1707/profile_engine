@@ -1,5 +1,6 @@
 from django.urls import path
-from .views import ChatProfilingView
+from .views import ProfileEngineAPI
+
 urlpatterns = [
-    path('explain/', ChatProfilingView.as_view(), name='explain-profile'),
+    path("profile/", ProfileEngineAPI.as_view(), name="profile-engine"),
 ]
