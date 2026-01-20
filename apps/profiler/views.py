@@ -47,12 +47,10 @@ def extract_json_and_narrative(ai_output: str):
     If JSON is missing, it treats the whole output as the Narrative.
     """
     try:
-        # Locate the JSON boundaries
         start_index = ai_output.find("{")
         end_index = ai_output.rfind("}")
 
         if start_index == -1 or end_index == -1:
-            # No JSON found, return empty dict and full text
             return {}, ai_output.strip()
 
         json_part = ai_output[start_index:end_index + 1]
