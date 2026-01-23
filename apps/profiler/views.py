@@ -1,8 +1,7 @@
 import uuid
 import json
 import docx
-import fitz
-from collections import defaultdict
+import fitz  
 from django.db import transaction
 from django.http import FileResponse
 from rest_framework.views import APIView
@@ -11,117 +10,119 @@ from .models import ChatSession, GeneratedOutput
 from apps.core.utils import generate_profile_pdf
 import ollama
 
+EXTRACTION_PROMPT = """
+You are a Precision Data Extractor.
 
-SYSTEM_PROMPT = """
-You are a professional profiling engine capable of creating concise, accurate, and structured profiles for ANY subject.
+Analyze the text and extract only concrete, verifiable facts.
+Do NOT interpret, summarize, explain, or infer.
 
 Rules:
-- Output must be plain text only
-- No markdown symbols
-- No bullets, dashes, numbering, or emojis
-- No slashes or escape characters
-- Section titles must be plain words followed by a colon
-- Do not use filler phrases
-- Do not hallucinate information
-- Use paragraphs only
+- Preserve factual accuracy.
+- Separate financial performance from valuation or reputation.
+- Keep exact wording only when criticism or claims are specific.
+- Remove marketing language and subjective praise unless quoted.
 
-Allowed sections:
-Key Achievements
-Early Life Origins
-Education Training
-Career Contributions
-Products Services
-Recognition Awards
-Timeline
-Key Roles Key Facts
-Additional Notes
+Extract factual signals such as:
+- Subject type (person, company, place, service, institution)
+- Role, function, or operational purpose
+- Location or scope of operation
+- Time-based changes or pivots (facts only)
+- Quantitative data (revenue, valuation, scale, experience)
+- Named individuals and their roles
+- Explicit risks, failures, limitations, or criticisms
+
+Output as short bullet points only.
 """
 
 
-def clean_input(text):
+SYNTHESIS_PROMPT = """
+You are operating in PROFILING MODE.
+
+This is an internal analytical profile, not a summary, explanation, or rewrite.
+
+You are given extracted factual signals about a subject.
+The subject may be a person, company, place, service, institution, or role.
+
+Your task is to infer:
+- operating posture
+- structural strengths
+- systemic constraints
+- decision-relevant implications
+
+DO NOT use chronological phrasing:
+- Avoid references like "in 2018" or "from X to Y"
+- Do not narrate events, timelines, or historical sequences
+- Do not imply past → present order
+
+MANDATORY BEHAVIOR:
+- Convert facts into behavioral tendencies, leverage points, and risks
+- Focus on present-state characteristics
+- Use events or individuals only as evidence for inferred patterns
+- Treat unknowns as unknowns; do not speculate
+
+STRICT PROHIBITIONS:
+- No summarization or paraphrasing of source text
+- No history, founding, or chronological narration
+- No product, service, or feature listings unless they illustrate constraints
+- No encyclopedic tone, explanations, or public-facing language
+- No headings, bullets, labels, or templates
+- No praise, marketing, or generic descriptions
+- No sentences starting with definitions (e.g., "X is…")
+
+OUTPUT REQUIREMENTS:
+- Short, dense analytical paragraphs or compact lines
+- Neutral, professional, decision-facing tone
+- Output must read as an internal intelligence or diligence note
+
+SELF-CHECK:
+If the output implies timeline progression or historical narrative, rewrite to remove it, keeping only operational posture, structural strengths, constraints, and decision implications.
+
+"""
+
+
+VALIDATOR_PROMPT = """
+You are an Output Validator for a Profiling Engine.
+
+Review the generated profile below.
+
+Determine whether it violates profiling rules by behaving like
+a summary, rewrite, or descriptive explanation.
+
+Violations include:
+- Restating or paraphrasing source facts
+- Encyclopedic or educational tone
+- Historical or chronological narration
+- Product, service, or feature listing
+- Headings, bullets, labels, or templates
+- Public-facing descriptive language
+
+If NO violations are found:
+Return exactly:
+APPROVED
+
+If ANY violation is found:
+Rewrite the content so it fully complies with PROFILING MODE.
+Return ONLY the corrected profile text.
+Do NOT explain what was changed.
+"""
+
+
+def clean_input(text: str) -> str:
     text = text.replace("\r", "\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     return "\n".join(lines)
 
 
-def chunk_text(text, max_chars=6000):
-    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+def chunk_text(text: str, max_chars=12000, overlap=500):
+    chunks = []
+    start = 0
 
+    while start < len(text):
+        end = start + max_chars
+        chunks.append(text[start:end])
+        start += max_chars - overlap
 
-def merge_chunks(chunks):
-    sections = defaultdict(list)
-    current_section = None
-
-    for chunk in chunks:
-        lines = chunk.split("\n")
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Detect section headers conservatively
-            if line.endswith(":") and len(line.split()) <= 4:
-                current_section = line
-                continue
-
-            # Fallback when model does not emit headers
-            if current_section:
-                sections[current_section].append(line)
-            else:
-                sections["Additional Notes:"].append(line)
-
-    final_blocks = []
-    for section, content in sections.items():
-        if not content:
-            continue
-        final_blocks.append(section + "\n" + " ".join(content))
-
-    return "\n\n".join(final_blocks)
-
-
-def normalize_headers(text):
-    replacements = {
-        "Early Life  Origins:": "Early Life Origins:",
-        "Education  Training:": "Education Training:",
-        "Career  Contributions:": "Career Contributions:",
-        "Products  Services:": "Products Services:",
-        "Recognition  Awards:": "Recognition Awards:",
-        "Key Roles  Key Facts:": "Key Roles Key Facts:"
-    }
-    for bad, good in replacements.items():
-        text = text.replace(bad, good)
-    return text
-
-
-def remove_list_symbols(text):
-    cleaned = []
-    for line in text.split("\n"):
-        line = line.lstrip("-•– ").strip()
-        cleaned.append(line)
-    return "\n".join(cleaned)
-
-
-def remove_empty_sections(text):
-    blocks = text.split("\n\n")
-    valid_blocks = []
-
-    for block in blocks:
-        lines = block.split("\n")
-        if len(lines) == 1 and lines[0].endswith(":"):
-            continue
-        valid_blocks.append(block)
-
-    return "\n\n".join(valid_blocks)
-
-
-def final_normalize(text):
-    for ch in ["*", "`", "_", "#", "/", "\\", "-"]:
-        text = text.replace(ch, "")
-    text = normalize_headers(text)
-    text = remove_list_symbols(text)
-    text = remove_empty_sections(text)
-    return text.strip()
-
+    return chunks
 
 class ProfileEngineAPI(APIView):
 
@@ -133,6 +134,7 @@ class ProfileEngineAPI(APIView):
         uploaded_file = request.FILES.get("file")
         extracted_text = ""
 
+        # ---- Text ingestion ----
         if isinstance(text_data, dict):
             extracted_text = json.dumps(text_data)
         else:
@@ -145,15 +147,13 @@ class ProfileEngineAPI(APIView):
                     extracted_text = " ".join(
                         p.text for p in doc.paragraphs if p.text.strip()
                     )
-
                 elif uploaded_file.name.lower().endswith(".pdf"):
-                    pdf = fitz.open(
-                        stream=uploaded_file.read(),
-                        filetype="pdf"
-                    )
-                    extracted_text = " ".join(page.get_text() for page in pdf)
-                    pdf.close()
-
+                    with fitz.open(
+                        stream=uploaded_file.read(), filetype="pdf"
+                    ) as pdf:
+                        extracted_text = " ".join(
+                            page.get_text() for page in pdf
+                        )
             except Exception as e:
                 return Response(
                     {"error": f"File extraction failed: {str(e)}"},
@@ -161,64 +161,98 @@ class ProfileEngineAPI(APIView):
                 )
 
         extracted_text = clean_input(extracted_text)
+
         if not extracted_text:
-            return Response(
-                {"error": "No valid input data provided."},
-                status=400
-            )
+            return Response({"error": "No valid input provided."}, status=400)
 
+        # ---- Extraction phase ----
         chunks = chunk_text(extracted_text)
-        ai_outputs = []
+        extracted_notes = []
 
-        try:
-            for chunk in chunks:
+        for i, chunk in enumerate(chunks):
+            try:
                 response = ollama.chat(
                     model="llama3.2",
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": EXTRACTION_PROMPT},
                         {"role": "user", "content": chunk}
                     ],
-                    options={"temperature": 0.6}
+                    options={"temperature": 0.2}
                 )
-                ai_outputs.append(response["message"]["content"])
-        except Exception as e:
+                extracted_notes.append(response["message"]["content"])
+            except Exception as e:
+                print(f"Extraction failed for chunk {i}: {e}")
+
+        raw_facts = "\n".join(extracted_notes)
+
+        if not raw_facts.strip():
             return Response(
-                {"error": f"AI processing failed: {str(e)}"},
+                {"error": "Fact extraction failed."},
                 status=500
             )
 
-        final_content = merge_chunks(ai_outputs)
-        final_content = final_normalize(final_content)
-
-        if not final_content.strip():
-            final_content = (
-                "Additional Notes:\n"
-                "No structured information could be extracted from the input."
+        # ---- Profiling (synthesis) ----
+        try:
+            profiling_response = ollama.chat(
+                model="llama3.2",
+                messages=[
+                    {"role": "system", "content": SYNTHESIS_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Extracted factual notes:\n\n{raw_facts}"
+                    }
+                ],
+                options={"temperature": 0.3}
+            )
+            final_profile = profiling_response["message"]["content"]
+        except Exception as e:
+            return Response(
+                {"error": f"Profiling failed: {str(e)}"},
+                status=500
             )
 
+        # ---- Validation & enforcement ----
+        try:
+            validator_response = ollama.chat(
+                model="llama3.2",
+                messages=[
+                    {"role": "system", "content": VALIDATOR_PROMPT},
+                    {"role": "user", "content": final_profile}
+                ],
+                options={"temperature": 0.0}
+            )
+
+            validated = validator_response["message"]["content"].strip()
+            if validated != "APPROVED":
+                final_profile = validated
+
+        except Exception as e:
+            return Response(
+                {"error": f"Validation failed: {str(e)}"},
+                status=500
+            )
+
+        # ---- Persist output ----
         with transaction.atomic():
             GeneratedOutput.objects.create(
                 session=session,
                 output_type="profile_text",
-                content=final_content
+                content=final_profile
             )
 
+        # ---- Optional PDF ----
         if request.data.get("format") == "pdf":
-            pdf_file = generate_profile_pdf(
-                final_content,
-                "Profile Report"
-            )
+            pdf_file = generate_profile_pdf(final_profile, "Profile Report")
             return FileResponse(
                 pdf_file,
                 as_attachment=True,
-                filename=f"profile_{session_id}.pdf",
-                content_type="application/pdf"
+                filename=f"profile_{session_id}.pdf"
             )
 
         return Response(
             {
                 "session_id": session_id,
-                "response": final_content
+                "response": final_profile
             },
             status=200
         )
