@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+import uuid
 
 class ChatSession(models.Model):
     """
@@ -104,28 +105,48 @@ class ProfilingInference(models.Model):
     class Meta:
         ordering = ['-created_at']  
         db_table = 'profiler_profiling_inferences'
-class GeneratedOutput(models.Model):
-    session = models.ForeignKey(
-        ChatSession,
-        related_name="outputs",
-        on_delete=models.CASCADE
-    )
-
-    output_type = models.CharField(
-        max_length=20,
-        choices=[
-            ("chat", "Chat"),
-            ("pdf", "PDF"),
-            ("docx", "DOCX"),
-        ]
-    )
-
+class GeneratedOutput(models.Model):    
+    uuid_id = models.UUIDField(default=uuid.uuid4, null=True, editable=False, unique=True)
+    session = models.ForeignKey(ChatSession, related_name="outputs", on_delete=models.CASCADE)
+    output_type = models.CharField(max_length=20, choices=[("profile", "Profile"), ("comparison", "Comparison")])
+    raw_content = models.TextField()  # Full AI text
+    
+    # Updated to reflect the 'observations' naming convention
+    structured_content = models.JSONField(
+        null=True, 
+        blank=True,
+        help_text="Flattened JSON containing 'observations', 'avg_confidence', and 'summary'."
+    ) 
+    
+    created_at = models.DateTimeField(auto_now_add=True)
     content = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to="generated_outputs/", blank=True, null=True)
 
-    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         ordering = ['-created_at']  
         db_table = 'profiler_generated_outputs'
 
+class PromptVersion(models.Model):
+    PROMPT_TYPES = [
+        ("EXTRACTION", "Extraction"),
+        ("SYNTHESIS", "Synthesis"),
+        ("VALIDATOR", "Validator"),
+        ("RATING", "Rating"),
+        ("SUMMARY", "Summary"),
+        ("COMPARISON", "Comparison"),
+    ]
+
+    name = models.CharField(max_length=50, choices=PROMPT_TYPES)
+    version = models.CharField(max_length=50)
+    content = models.TextField()
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "profiler_prompt_versions"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} | {self.version} | {'ACTIVE' if self.is_active else 'INACTIVE'}"
