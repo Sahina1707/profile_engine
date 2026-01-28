@@ -106,18 +106,24 @@ class ProfilingInference(models.Model):
         ordering = ['-created_at']  
         db_table = 'profiler_profiling_inferences'
 class GeneratedOutput(models.Model):    
-    uuid_id = models.UUIDField(default=uuid.uuid4,null=True ,editable=False, unique=True)
+    uuid_id = models.UUIDField(default=uuid.uuid4, null=True, editable=False, unique=True)
     session = models.ForeignKey(ChatSession, related_name="outputs", on_delete=models.CASCADE)
     output_type = models.CharField(max_length=20, choices=[("profile", "Profile"), ("comparison", "Comparison")])
     raw_content = models.TextField()  # Full AI text
-    structured_content = models.JSONField(null=True, blank=True)  # concise bullets + summary
+    
+    # Updated to reflect the 'observations' naming convention
+    structured_content = models.JSONField(
+        null=True, 
+        blank=True,
+        help_text="Flattened JSON containing 'observations', 'avg_confidence', and 'summary'."
+    ) 
+    
     created_at = models.DateTimeField(auto_now_add=True)
-
     content = models.TextField(blank=True, null=True)
     file = models.FileField(upload_to="generated_outputs/", blank=True, null=True)
 
-    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         ordering = ['-created_at']  
         db_table = 'profiler_generated_outputs'
@@ -133,7 +139,7 @@ class PromptVersion(models.Model):
     ]
 
     name = models.CharField(max_length=50, choices=PROMPT_TYPES)
-    version = models.CharField(max_length=20)
+    version = models.CharField(max_length=50)
     content = models.TextField()
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
