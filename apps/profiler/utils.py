@@ -41,21 +41,27 @@ def parse_bullets(text: str):
     return bullets
 
 def normalize_structured_output(raw_json: str, fallback_profile: str, fallback_rating: str):
-    """
-    Final optimized normalization logic. 
-    Flattens output and strips hallucinated JSON syntax from observations.
-    """
     structured = {
-        "profile_points": {"domain": "UNKNOWN", "avg_confidence": 0, "observations": []},
-        "analyst_insights": {"avg_confidence": 0, "observations": []},
-        "executive_overview": fallback_profile[:500] if fallback_profile else "",
-        "evaluation": {"rating": 5, "risk_level": "UNKNOWN", "recommendations": []},
+        "profile_points": {
+            "domain": "UNKNOWN", 
+            "avg_confidence": 0, 
+            "observations": [] 
+        },
+        "analyst_insights": {
+            "avg_confidence": 0, 
+            "observations": [] 
+        },
+        "executive_overview": [], 
+        "evaluation": {
+            "rating": 5, 
+            "risk_level": "UNKNOWN", 
+            "recommendations": []
+        },
     }
 
     if not raw_json:
         return structured
 
-    # 1. CLEANING: Remove markdown decorators
     clean_text = re.sub(r'```python|```json|```', '', raw_json).strip()
     
     try:
@@ -64,61 +70,77 @@ def normalize_structured_output(raw_json: str, fallback_profile: str, fallback_r
         if start != -1 and end != -1:
             data = json.loads(clean_text[start:end+1])
 
-            # --- FLATTEN PROFILE POINTS ---
             raw_p = data.get("profile_points", [])
             if isinstance(raw_p, list) and raw_p:
                 valid = [p for p in raw_p if isinstance(p, dict)]
                 if valid:
                     structured["profile_points"]["domain"] = valid[0].get("domain", "General")
-                    
-                    # Calculate Confidence
                     scores = [float(p.get("score", 0)) * (1 if float(p.get("score", 0)) > 10 else 10) for p in valid]
                     structured["profile_points"]["avg_confidence"] = round(sum(scores) / len(valid))
                     
-                    # CLEAN OBSERVATIONS: Strip stray JSON artifacts found in ID 91
-                    clean_obs = []
+                    numbered_obs = []
+                    count = 1
                     for p in valid:
-                        val = p.get("description", p.get("text", ""))
-                        # Regex to strip backticks, braces, quotes, and square brackets
-                        sanitized = re.sub(r'```json|```|{|}|"|\[|\]', '', str(val)).strip()
-                        if len(sanitized) > 3:
-                            clean_obs.append(sanitized)
-                    structured["profile_points"]["observations"] = clean_obs
+                        text = str(p.get("description", p.get("text", ""))).strip()
+                        if any(k in text.lower() for k in ["import ", "def ", "python code", "snippet", "schema:"]):
+                            continue
+                        text = re.sub(r'[{}"\[\]]', '', text).strip()
+                        text = re.sub(r'^(Point\s*\d+:|Point\s*\d+|^\d+[:.])\s*', '', text, flags=re.IGNORECASE)
+                        if len(text) > 5:
+                            numbered_obs.append(f"{count} {text}")
+                            count += 1
+                        if count > 5: break
+                    structured["profile_points"]["observations"] = numbered_obs
 
-            # --- FLATTEN ANALYST INSIGHTS ---
             raw_ins = data.get("analyst_insights", [])
             if isinstance(raw_ins, list) and raw_ins:
-                obs, total, seen = [], 0, set()
+                numbered_ins, total, seen = [], 0, set()
+                count = 1
                 for i in raw_ins:
                     if isinstance(i, dict):
                         txt = i.get("insight", i.get("description", "")).strip()
-                        # Sanitize insights as well
-                        sanitized_ins = re.sub(r'```json|```|{|}|"|\[|\]', '', str(txt)).strip()
-                        if sanitized_ins and sanitized_ins not in seen:
-                            obs.append(sanitized_ins)
-                            seen.add(sanitized_ins)
+                        sanitized = re.sub(r'[{}"\[\]]', '', str(txt)).strip()
+                        sanitized = re.sub(r'^(Point\s*\d+:|Point\s*\d+|^\d+[:.])\s*', '', sanitized, flags=re.IGNORECASE)
+                        if sanitized and sanitized not in seen and not "import " in sanitized.lower():
+                            numbered_ins.append(f"{count} {sanitized}")
+                            seen.add(sanitized)
                             total += float(i.get("score", 0)) * (1 if float(i.get("score", 0)) > 10 else 10)
-                
-                structured["analyst_insights"]["observations"] = obs
-                if obs:
-                    structured["analyst_insights"]["avg_confidence"] = round(total / len(obs))
+                            count += 1
+                        if count > 3: break
+                structured["analyst_insights"]["observations"] = numbered_ins
+                if numbered_ins:
+                    structured["analyst_insights"]["avg_confidence"] = round(total / len(numbered_ins))
 
-            # --- MAP OVERVIEW & EVALUATION (Fixed space typo) ---
-            structured["executive_overview"] = data.get("executive_overview", structured["executive_overview"])
+            raw_overview = data.get("executive_overview", [])
+            items = raw_overview if isinstance(raw_overview, list) else [s.strip() for s in raw_overview.split('.') if len(s) > 10]
+            numbered_overview = []
+            for idx, item in enumerate(items[:5], 1):
+                clean_item = re.sub(r'^(Point\s*\d+:|Point\s*\d+|^\d+[:.])\s*', '', str(item), flags=re.IGNORECASE).strip()
+                if clean_item and not any(k in clean_item.lower() for k in ["import ", "def ", "schema"]):
+                    numbered_overview.append(f"{idx} {clean_item}")
+            structured["executive_overview"] = numbered_overview
+
             ev = data.get("evaluation", {})
             structured["evaluation"]["rating"] = ev.get("rating", 5)
-            
             risk = str(ev.get("risk_level", "UNKNOWN")).upper()
             if risk in ["LOW", "MEDIUM", "HIGH"]:
                 structured["evaluation"]["risk_level"] = risk
-                
+            else:
+                if structured["evaluation"]["rating"] >= 7:
+                    structured["evaluation"]["risk_level"] = "LOW"
+                else:
+                    structured["evaluation"]["risk_level"] = "UNKNOWN"
+            
+            # Numbering for Recommendations
             recs = ev.get("recommendations", [])
-            structured["evaluation"]["recommendations"] = [
-                r.get("description", r) if isinstance(r, dict) else r for r in recs
-            ]
+            numbered_recs = []
+            for idx, r in enumerate(recs[:5], 1):
+                clean_rec = r.get("description", r) if isinstance(r, dict) else r
+                clean_rec = re.sub(r'^(Point\s*\d+:|Point\s*\d+|^\d+[:.])\s*', '', str(clean_rec), flags=re.IGNORECASE).strip()
+                numbered_recs.append(f"{idx} {clean_rec}")
+            structured["evaluation"]["recommendations"] = numbered_recs
 
-    except Exception as e:
-        print(f"Sanitization Error: {e}")
-        structured["profile_points"]["observations"] = parse_bullets(raw_json)[:5]
+    except Exception:
+        structured["profile_points"]["observations"] = [f"{i} {t}" for i, t in enumerate(parse_bullets(raw_json)[:5], 1)]
         
     return structured
